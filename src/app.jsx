@@ -661,9 +661,9 @@ export default function PlayingTimeApp() {
                         >
                           {delta === 0
                             ? "±0"
-                            : `${delta > 0 ? "+" : ""}${Math.round(
-                                delta / 1000
-                              )}s`}
+                            : `${delta > 0 ? "+" : ""}${(
+                                delta / 60000
+                              ).toFixed(2)}m`}
                         </span>
                       </div>
                       <div className="w-16 shrink-0">
