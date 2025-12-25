@@ -22,6 +22,13 @@ import {
   Minus,
   Timer,
   ChevronDown,
+  Shuffle,
+  ArrowUpCircle,
+  ArrowDownCircle,
+  Pin,
+  PinOff,
+  UserX,
+  UserCheck,
 } from "lucide-react";
 
 // ---------- Utilities ----------
@@ -81,6 +88,8 @@ export default function PlayingTimeApp() {
       id: i + 1,
       name: DEFAULT_NAMES[i] ?? `Player ${i + 1}`,
       active: i < onCourt,
+      pinned: false,
+      absent: false,
       totalMs: 0,
       periodMs: Array(numPeriods).fill(0),
     }))
@@ -97,6 +106,9 @@ export default function PlayingTimeApp() {
   // Error toast for too many players
   const [errorToast, setErrorToast] = useState(null);
   const errorTimeoutRef = useRef(null);
+  // Track swaps from autofill: { swappedIn: Set of player ids, swappedOut: Set of player ids }
+  const [lastSwaps, setLastSwaps] = useState({ swappedIn: new Set(), swappedOut: new Set() });
+  const swapTimeoutRef = useRef(null);
   // Toast notification for errors
   const [toast, setToast] = useState(null);
   const toastTimeoutRef = useRef(null);
@@ -147,6 +159,8 @@ export default function PlayingTimeApp() {
           name:
             saved.players?.[i]?.name ?? DEFAULT_NAMES[i] ?? `Player ${i + 1}`,
           active: i < (saved.onCourt ?? 5),
+          pinned: false,
+          absent: saved.players?.[i]?.absent ?? false,
           totalMs: 0,
           periodMs: Array(nP).fill(0),
         }))
@@ -167,7 +181,7 @@ export default function PlayingTimeApp() {
       format,
       periodMinutes,
       rosterName,
-      players: players.map((p) => ({ name: p.name })),
+      players: players.map((p) => ({ name: p.name, absent: p.absent })),
       timeoutsUsed,
       overtimes,
       otElapsedMs,
@@ -216,6 +230,8 @@ export default function PlayingTimeApp() {
             id: i + 1,
             name: DEFAULT_NAMES[i] ?? `Player ${i + 1}`,
             active: i < onCourt,
+            pinned: false,
+            absent: false,
             totalMs: 0,
             periodMs: Array(numPeriods).fill(0),
           });
@@ -263,14 +279,19 @@ export default function PlayingTimeApp() {
     () => periodElapsedMs.reduce((a, b) => a + b, 0),
     [periodElapsedMs]
   );
+  // Count of players who are not absent (eligible for play)
+  const eligiblePlayerCount = useMemo(
+    () => players.filter((p) => !p.absent).length,
+    [players]
+  );
   const idealMsSoFar = useMemo(
-    () => (numPlayers ? gameElapsedMs * (onCourt / numPlayers) : 0),
-    [gameElapsedMs, onCourt, numPlayers]
+    () => (eligiblePlayerCount ? gameElapsedMs * (onCourt / eligiblePlayerCount) : 0),
+    [gameElapsedMs, onCourt, eligiblePlayerCount]
   );
   const fullGameMs = numPeriods * periodLengthMs;
   const goalPerPlayerFullGameMs = useMemo(
-    () => (numPlayers ? (fullGameMs * onCourt) / numPlayers : 0),
-    [fullGameMs, numPlayers, onCourt]
+    () => (eligiblePlayerCount ? (fullGameMs * onCourt) / eligiblePlayerCount : 0),
+    [fullGameMs, eligiblePlayerCount, onCourt]
   );
 
   const periodLabels = useMemo(
@@ -279,6 +300,7 @@ export default function PlayingTimeApp() {
   );
 
   const activeCount = players.filter((p) => p.active).length;
+  const absentCount = players.filter((p) => p.absent).length;
   const needSubs = activeCount !== onCourt;
 
   // -------- Actions --------
@@ -289,7 +311,8 @@ export default function PlayingTimeApp() {
     setPlayers((prev) =>
       prev.map((p, i) => ({
         ...p,
-        active: i < onCourt,
+        active: !p.absent && i < onCourt,
+        pinned: false,
         totalMs: 0,
         periodMs: Array(numPeriods).fill(0),
       }))
@@ -299,6 +322,8 @@ export default function PlayingTimeApp() {
     setOvertimes(0);
     setOtElapsedMs(0);
     setOtRunning(false);
+    // clear swap indicators
+    setLastSwaps({ swappedIn: new Set(), swappedOut: new Set() });
   };
   const nextPeriod = () => {
     setRunning(false);
@@ -333,11 +358,67 @@ export default function PlayingTimeApp() {
       return next;
     });
   };
+  const togglePinned = (idx) => {
+    setPlayers((prev) => {
+      const next = [...prev];
+      // Can only pin active players
+      if (next[idx].active) {
+        next[idx] = { ...next[idx], pinned: !next[idx].pinned };
+      }
+      return next;
+    });
+  };
+  const toggleAbsent = (idx) => {
+    setPlayers((prev) => {
+      const next = [...prev];
+      const wasAbsent = next[idx].absent;
+      // If marking as absent, also deactivate and unpin
+      if (!wasAbsent) {
+        next[idx] = { ...next[idx], absent: true, active: false, pinned: false };
+      } else {
+        next[idx] = { ...next[idx], absent: false };
+      }
+      return next;
+    });
+  };
   const autoFill = () => {
-    const byTime = players
-      .map((p, i) => ({ i, totalMs: p.totalMs }))
+    // Get pinned players (they stay active)
+    const pinnedIndices = new Set(
+      players.map((p, i) => (p.active && p.pinned ? i : null)).filter((i) => i !== null)
+    );
+    const pinnedCount = pinnedIndices.size;
+    const slotsToFill = onCourt - pinnedCount;
+
+    // Get eligible players (not absent, not pinned) sorted by time
+    const eligible = players
+      .map((p, i) => ({ i, id: p.id, totalMs: p.totalMs, wasActive: p.active, pinned: p.pinned, absent: p.absent }))
+      .filter((p) => !p.absent && !pinnedIndices.has(p.i))
       .sort((a, b) => a.totalMs - b.totalMs);
-    const toActivate = new Set(byTime.slice(0, onCourt).map((x) => x.i));
+
+    // Select the lowest-time players to fill remaining slots
+    const toActivate = new Set([
+      ...pinnedIndices,
+      ...eligible.slice(0, slotsToFill).map((x) => x.i),
+    ]);
+    
+    // Track who was swapped in/out (excluding pinned)
+    const swappedIn = new Set();
+    const swappedOut = new Set();
+    players.forEach((p, i) => {
+      if (p.absent) return; // Ignore absent players
+      const willBeActive = toActivate.has(i);
+      if (!p.active && willBeActive && !p.pinned) swappedIn.add(p.id);
+      if (p.active && !willBeActive && !p.pinned) swappedOut.add(p.id);
+    });
+    
+    // Clear previous timeout and set new swaps
+    if (swapTimeoutRef.current) clearTimeout(swapTimeoutRef.current);
+    setLastSwaps({ swappedIn, swappedOut });
+    // Auto-clear swap indicators after 5 seconds
+    swapTimeoutRef.current = setTimeout(() => {
+      setLastSwaps({ swappedIn: new Set(), swappedOut: new Set() });
+    }, 5000);
+    
     setPlayers((prev) =>
       prev.map((p, i) => ({ ...p, active: toActivate.has(i) }))
     );
@@ -371,7 +452,7 @@ export default function PlayingTimeApp() {
   const saveCurrentRoster = () => {
     const name = (rosterName || "Roster").trim();
     const roster = {
-      players: players.map((p) => ({ name: p.name })),
+      players: players.map((p) => ({ name: p.name, absent: p.absent })),
       numPlayers,
       onCourt,
     };
@@ -387,13 +468,18 @@ export default function PlayingTimeApp() {
     setOnCourt(entry.onCourt ?? onCourt);
     setPlayers(() => {
       const n = entry.players?.length ?? numPlayers;
-      return Array.from({ length: n }, (_, i) => ({
-        id: i + 1,
-        name: entry.players?.[i]?.name ?? DEFAULT_NAMES[i] ?? `Player ${i + 1}`,
-        active: i < (entry.onCourt ?? onCourt),
-        totalMs: 0,
-        periodMs: Array(numPeriods).fill(0),
-      }));
+      return Array.from({ length: n }, (_, i) => {
+        const isAbsent = entry.players?.[i]?.absent ?? false;
+        return {
+          id: i + 1,
+          name: entry.players?.[i]?.name ?? DEFAULT_NAMES[i] ?? `Player ${i + 1}`,
+          active: !isAbsent && i < (entry.onCourt ?? onCourt),
+          pinned: false,
+          absent: isAbsent,
+          totalMs: 0,
+          periodMs: Array(numPeriods).fill(0),
+        };
+      });
     });
     setRunning(false);
     setCurrentPeriod(0);
@@ -615,6 +701,8 @@ export default function PlayingTimeApp() {
                     ? goalPerPlayerFullGameMs
                     : idealMsSoFar);
                 const isExpanded = expandedIds.has(p.id);
+                const wasSwappedIn = lastSwaps.swappedIn.has(p.id);
+                const wasSwappedOut = lastSwaps.swappedOut.has(p.id);
 
                 return (
                   <motion.div
@@ -623,12 +711,69 @@ export default function PlayingTimeApp() {
                     transition={{
                       layout: { type: "spring", stiffness: 500, damping: 35 },
                     }}
-                    className={`rounded-2xl shadow-sm overflow-hidden ${
-                      p.active
+                    className={`rounded-2xl shadow-sm overflow-hidden relative ${
+                      p.absent
+                        ? "bg-gray-100 opacity-60"
+                        : p.active
                         ? "bg-gradient-to-r from-emerald-50 to-white border-l-4 border-emerald-500"
                         : "bg-white"
-                    }`}
+                    } ${wasSwappedIn ? "ring-2 ring-emerald-400" : ""} ${
+                      wasSwappedOut ? "ring-2 ring-rose-400" : ""
+                    } ${p.pinned ? "ring-2 ring-amber-400" : ""}`}
                   >
+                    {/* Status badges */}
+                    <div className="absolute top-1 right-1 flex items-center gap-1 z-10">
+                      {/* Pinned badge */}
+                      {p.pinned && (
+                        <motion.div
+                          initial={{ opacity: 0, scale: 0.5 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          className="px-2 py-0.5 rounded-full text-[10px] font-semibold flex items-center gap-1 bg-amber-500 text-white"
+                        >
+                          <Pin size={10} />
+                          PINNED
+                        </motion.div>
+                      )}
+                      {/* Absent badge */}
+                      {p.absent && (
+                        <motion.div
+                          initial={{ opacity: 0, scale: 0.5 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          className="px-2 py-0.5 rounded-full text-[10px] font-semibold flex items-center gap-1 bg-gray-500 text-white"
+                        >
+                          <UserX size={10} />
+                          ABSENT
+                        </motion.div>
+                      )}
+                      {/* Swap indicator badge */}
+                      <AnimatePresence>
+                        {(wasSwappedIn || wasSwappedOut) && (
+                          <motion.div
+                            initial={{ opacity: 0, scale: 0.5 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            exit={{ opacity: 0, scale: 0.5 }}
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-semibold flex items-center gap-1 ${
+                              wasSwappedIn
+                                ? "bg-emerald-500 text-white"
+                                : "bg-rose-500 text-white"
+                            }`}
+                          >
+                            {wasSwappedIn ? (
+                              <>
+                                <ArrowUpCircle size={12} />
+                                IN
+                              </>
+                            ) : (
+                              <>
+                                <ArrowDownCircle size={12} />
+                                OUT
+                              </>
+                            )}
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+
                     {/* Collapsed header - always visible */}
                     <motion.div
                       layout="position"
@@ -638,15 +783,18 @@ export default function PlayingTimeApp() {
                       <input
                         type="checkbox"
                         checked={p.active}
+                        disabled={p.absent}
                         onChange={(e) => {
                           e.stopPropagation();
                           toggleActive(p.originalIdx);
                         }}
                         onClick={(e) => e.stopPropagation()}
-                        className="h-6 w-6 shrink-0"
+                        className="h-6 w-6 shrink-0 disabled:opacity-50"
                       />
                       <div className="flex-1 min-w-0 flex items-center gap-3">
-                        <span className="font-medium truncate">{p.name}</span>
+                        <span className={`font-medium truncate ${p.absent ? "line-through text-gray-500" : ""}`}>
+                          {p.name}
+                        </span>
                         <span className="text-xs tabular-nums text-gray-600">
                           {msToClock(p.totalMs)}
                         </span>
@@ -744,6 +892,56 @@ export default function PlayingTimeApp() {
                                   {msToClock(p.periodMs[i] || 0)}
                                 </div>
                               ))}
+                            </div>
+                            {/* Pin and Absent controls */}
+                            <div className="flex items-center gap-2 pt-2 border-t">
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  togglePinned(p.originalIdx);
+                                }}
+                                disabled={!p.active || p.absent}
+                                className={`flex-1 px-3 py-2 rounded-xl text-xs font-medium flex items-center justify-center gap-2 transition-colors ${
+                                  p.pinned
+                                    ? "bg-amber-500 text-white"
+                                    : "bg-amber-100 text-amber-700 hover:bg-amber-200"
+                                } disabled:opacity-40 disabled:cursor-not-allowed`}
+                              >
+                                {p.pinned ? (
+                                  <>
+                                    <PinOff size={14} />
+                                    Unpin
+                                  </>
+                                ) : (
+                                  <>
+                                    <Pin size={14} />
+                                    Pin (keep in)
+                                  </>
+                                )}
+                              </button>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  toggleAbsent(p.originalIdx);
+                                }}
+                                className={`flex-1 px-3 py-2 rounded-xl text-xs font-medium flex items-center justify-center gap-2 transition-colors ${
+                                  p.absent
+                                    ? "bg-gray-500 text-white"
+                                    : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                                }`}
+                              >
+                                {p.absent ? (
+                                  <>
+                                    <UserCheck size={14} />
+                                    Mark Present
+                                  </>
+                                ) : (
+                                  <>
+                                    <UserX size={14} />
+                                    Mark Absent
+                                  </>
+                                )}
+                              </button>
                             </div>
                           </div>
                         </motion.div>
@@ -988,11 +1186,12 @@ export default function PlayingTimeApp() {
       {/* Sticky mobile controls */}
       <div className="fixed bottom-0 left-0 right-0 border-t bg-white/95 backdrop-blur supports-[backdrop-filter]:bg-white/70 z-50">
         <div className="max-w-3xl mx-auto p-3 flex items-center gap-2 justify-between">
-          <div className="text-xs text-gray-600">
+          <div className="text-xs text-gray-600 hidden sm:block">
             Current {labelFor(format, currentPeriod)}:{" "}
             <b>{msToClock(periodElapsedMs[currentPeriod] || 0)}</b>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap justify-center sm:justify-end flex-1">
+            <AutoFillButton onClick={autoFill} />
             <IconButton
               onClick={() => setRunning((r) => !r)}
               variant={running ? "amber" : "emerald"}
@@ -1103,6 +1302,83 @@ function IconButton({
       <Icon size={16} />
       <span className="hidden sm:inline">{label}</span>
     </motion.button>
+  );
+}
+
+function AutoFillButton({ onClick }) {
+  const [showTooltip, setShowTooltip] = useState(false);
+  const longPressRef = useRef(null);
+
+  const handleTouchStart = () => {
+    longPressRef.current = setTimeout(() => {
+      setShowTooltip(true);
+    }, 500);
+  };
+
+  const handleTouchEnd = () => {
+    if (longPressRef.current) {
+      clearTimeout(longPressRef.current);
+    }
+    if (!showTooltip) {
+      onClick();
+    }
+    setTimeout(() => setShowTooltip(false), 2000);
+  };
+
+  const handleMouseDown = () => {
+    longPressRef.current = setTimeout(() => {
+      setShowTooltip(true);
+    }, 500);
+  };
+
+  const handleMouseUp = () => {
+    if (longPressRef.current) {
+      clearTimeout(longPressRef.current);
+    }
+    if (!showTooltip) {
+      onClick();
+    }
+  };
+
+  const handleMouseLeave = () => {
+    if (longPressRef.current) {
+      clearTimeout(longPressRef.current);
+    }
+    setShowTooltip(false);
+  };
+
+  return (
+    <div className="relative">
+      <AnimatePresence>
+        {showTooltip && (
+          <motion.div
+            initial={{ opacity: 0, y: 10, scale: 0.9 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 5, scale: 0.95 }}
+            className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 w-64 p-3 rounded-xl bg-gray-900 text-white text-xs shadow-xl z-[100]"
+          >
+            <div className="font-semibold mb-1">Auto Fill</div>
+            <p>
+              Automatically selects the {5} players with the least playing time
+              to go on court. Great for ensuring fair play time distribution!
+            </p>
+            <div className="absolute bottom-0 left-1/2 -translate-x-1/2 translate-y-1/2 rotate-45 w-2 h-2 bg-gray-900" />
+          </motion.div>
+        )}
+      </AnimatePresence>
+      <motion.button
+        whileTap={{ scale: 0.95 }}
+        onTouchStart={handleTouchStart}
+        onTouchEnd={handleTouchEnd}
+        onMouseDown={handleMouseDown}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseLeave}
+        className="px-3 py-2 rounded-xl text-sm inline-flex items-center gap-2 bg-gradient-to-r from-sky-500 to-indigo-600 text-white shadow-md hover:shadow-lg active:shadow-sm transition-shadow"
+      >
+        <Shuffle size={16} />
+        <span>Auto Fill</span>
+      </motion.button>
+    </div>
   );
 }
 
