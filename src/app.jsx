@@ -13,6 +13,7 @@ import {
   Pause,
   SkipForward,
   RotateCw,
+  RotateCcw,
   Download,
   Users,
   Clock,
@@ -113,6 +114,12 @@ export default function PlayingTimeApp() {
   const [toast, setToast] = useState(null);
   const toastTimeoutRef = useRef(null);
 
+  // New game confirmation
+  const [showNewGameConfirm, setShowNewGameConfirm] = useState(false);
+
+  // Persistence flag - don't save until after initial load
+  const hasLoadedRef = useRef(false);
+
   // -------- Timeouts & Overtime (single team; independent of player timer) --------
   const BASE_TIMEOUTS = 5; // full timeouts per game
   const OT_LENGTH_MS = 3 * 60 * 1000; // 3 minutes per overtime
@@ -141,47 +148,71 @@ export default function PlayingTimeApp() {
     return () => clearInterval(iv);
   }, [otRunning]);
 
-  // -------- Persistence (names + config + timeouts) --------
+  // -------- Persistence (full game state) --------
   useEffect(() => {
     const saved = loadState();
-    if (!saved) return;
-    setNumPlayers(saved.numPlayers ?? DEFAULT_NAMES.length);
-    setOnCourt(saved.onCourt ?? 5);
-    setFormat(saved.format ?? "Quarters");
-    setPeriodMinutes(saved.periodMinutes ?? 8);
-    setRosterName(saved.rosterName ?? "My Roster");
-    // players
-    if (Array.isArray(saved.players) && saved.players.length) {
-      const nP = (saved.format ?? "Quarters") === "Quarters" ? 4 : 2;
-      setPlayers(
-        Array.from({ length: saved.players.length }, (_, i) => ({
-          id: i + 1,
-          name:
-            saved.players?.[i]?.name ?? DEFAULT_NAMES[i] ?? `Player ${i + 1}`,
-          active: i < (saved.onCourt ?? 5),
-          pinned: false,
-          absent: saved.players?.[i]?.absent ?? false,
-          totalMs: 0,
-          periodMs: Array(nP).fill(0),
-        }))
-      );
-      setPeriodElapsedMs(Array(nP).fill(0));
-      setCurrentPeriod(0);
+    if (saved) {
+      setNumPlayers(saved.numPlayers ?? DEFAULT_NAMES.length);
+      setOnCourt(saved.onCourt ?? 5);
+      setFormat(saved.format ?? "Quarters");
+      setPeriodMinutes(saved.periodMinutes ?? 8);
+      setRosterName(saved.rosterName ?? "My Roster");
+      // players with full state
+      if (Array.isArray(saved.players) && saved.players.length) {
+        const nP = (saved.format ?? "Quarters") === "Quarters" ? 4 : 2;
+        setPlayers(
+          Array.from({ length: saved.players.length }, (_, i) => {
+            const sp = saved.players?.[i];
+            return {
+              id: i + 1,
+              name: sp?.name ?? DEFAULT_NAMES[i] ?? `Player ${i + 1}`,
+              active: sp?.active ?? i < (saved.onCourt ?? 5),
+              pinned: sp?.pinned ?? false,
+              absent: sp?.absent ?? false,
+              totalMs: sp?.totalMs ?? 0,
+              periodMs: sp?.periodMs ?? Array(nP).fill(0),
+            };
+          })
+        );
+      }
+      // game progress
+      if (Array.isArray(saved.periodElapsedMs)) {
+        setPeriodElapsedMs(saved.periodElapsedMs);
+      }
+      if (typeof saved.currentPeriod === "number") {
+        setCurrentPeriod(saved.currentPeriod);
+      }
+      // timeouts
+      setTimeoutsUsed(saved.timeoutsUsed ?? 0);
+      setOvertimes(saved.overtimes ?? 0);
+      setOtElapsedMs(saved.otElapsedMs ?? 0);
     }
-    // timeouts
-    setTimeoutsUsed(saved.timeoutsUsed ?? 0);
-    setOvertimes(saved.overtimes ?? 0);
-    setOtElapsedMs(saved.otElapsedMs ?? 0);
+    // Mark as loaded AFTER state updates are scheduled
+    // Use requestAnimationFrame to wait for React to process the state updates
+    requestAnimationFrame(() => {
+      hasLoadedRef.current = true;
+    });
   }, []);
 
   useEffect(() => {
+    // Don't save until initial load is complete
+    if (!hasLoadedRef.current) return;
     saveState({
       numPlayers,
       onCourt,
       format,
       periodMinutes,
       rosterName,
-      players: players.map((p) => ({ name: p.name, absent: p.absent })),
+      players: players.map((p) => ({
+        name: p.name,
+        active: p.active,
+        pinned: p.pinned,
+        absent: p.absent,
+        totalMs: p.totalMs,
+        periodMs: p.periodMs,
+      })),
+      currentPeriod,
+      periodElapsedMs,
       timeoutsUsed,
       overtimes,
       otElapsedMs,
@@ -193,6 +224,8 @@ export default function PlayingTimeApp() {
     periodMinutes,
     rosterName,
     players,
+    currentPeriod,
+    periodElapsedMs,
     timeoutsUsed,
     overtimes,
     otElapsedMs,
@@ -1108,13 +1141,41 @@ export default function PlayingTimeApp() {
             />
           </Labeled>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button
-            className="w-full sm:w-auto px-4 py-3 rounded-xl bg-sky-600 text-white hover:bg-sky-700 active:scale-[.99]"
+            className="px-4 py-3 rounded-xl bg-sky-600 text-white hover:bg-sky-700 active:scale-[.99]"
             onClick={autoFill}
           >
             Auto-Fill (lowest time)
           </button>
+          {!showNewGameConfirm ? (
+            <button
+              className="px-4 py-3 rounded-xl bg-rose-100 text-rose-700 hover:bg-rose-200 active:scale-[.99] flex items-center gap-2"
+              onClick={() => setShowNewGameConfirm(true)}
+            >
+              <RotateCcw size={16} />
+              New Game
+            </button>
+          ) : (
+            <div className="flex items-center gap-2 bg-rose-50 border border-rose-200 rounded-xl px-3 py-2">
+              <span className="text-sm text-rose-700">Reset all times?</span>
+              <button
+                className="px-3 py-1.5 rounded-lg bg-rose-600 text-white text-sm hover:bg-rose-700"
+                onClick={() => {
+                  resetAll();
+                  setShowNewGameConfirm(false);
+                }}
+              >
+                Yes, reset
+              </button>
+              <button
+                className="px-3 py-1.5 rounded-lg bg-gray-200 text-gray-700 text-sm hover:bg-gray-300"
+                onClick={() => setShowNewGameConfirm(false)}
+              >
+                Cancel
+              </button>
+            </div>
+          )}
           <div className="ml-auto flex items-center gap-2 text-xs">
             <span className="text-gray-500">Progress baseline:</span>
             <Segmented
