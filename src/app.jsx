@@ -7,7 +7,7 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from "recharts";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence, LayoutGroup } from "framer-motion";
 import {
   Play,
   Pause,
@@ -21,6 +21,7 @@ import {
   Plus,
   Minus,
   Timer,
+  ChevronDown,
 } from "lucide-react";
 
 // ---------- Utilities ----------
@@ -91,8 +92,14 @@ export default function PlayingTimeApp() {
   const [baseline, setBaseline] = useState("goal"); // 'goal' (full game / players) or 'ideal' (so far)
   // View mode for period columns: show only current period or completed periods
   const [periodView, setPeriodView] = useState("current"); // 'current' | 'completed'
-  // Layout: columns (players as columns) or cards (one per row)
-  const [layout, setLayout] = useState("columns"); // 'columns' | 'cards'
+  // Expanded accordion cards
+  const [expandedIds, setExpandedIds] = useState(new Set());
+  // Error toast for too many players
+  const [errorToast, setErrorToast] = useState(null);
+  const errorTimeoutRef = useRef(null);
+  // Toast notification for errors
+  const [toast, setToast] = useState(null);
+  const toastTimeoutRef = useRef(null);
 
   // -------- Timeouts & Overtime (single team; independent of player timer) --------
   const BASE_TIMEOUTS = 5; // full timeouts per game
@@ -297,7 +304,22 @@ export default function PlayingTimeApp() {
     setRunning(false);
     setCurrentPeriod((i) => Math.min(i + 1, numPeriods - 1));
   };
+  const showError = (message) => {
+    if (errorTimeoutRef.current) clearTimeout(errorTimeoutRef.current);
+    setErrorToast(message);
+    errorTimeoutRef.current = setTimeout(() => setErrorToast(null), 3000);
+  };
+
   const toggleActive = (idx) => {
+    const player = players[idx];
+    const currentActiveCount = players.filter((p) => p.active).length;
+    
+    // If trying to activate and already at max, show error
+    if (!player.active && currentActiveCount >= onCourt) {
+      showError(`Only ${onCourt} players can be on court. Remove someone first!`);
+      return;
+    }
+    
     setPlayers((prev) => {
       const next = [...prev];
       next[idx] = { ...next[idx], active: !next[idx].active };
@@ -401,6 +423,31 @@ export default function PlayingTimeApp() {
       ? completedPeriods
       : [currentPeriod];
 
+  // Sorted players: active first, then by totalMs descending
+  const sortedPlayers = useMemo(() => {
+    return [...players]
+      .map((p, idx) => ({ ...p, originalIdx: idx }))
+      .sort((a, b) => {
+        // Active players first
+        if (a.active !== b.active) return b.active - a.active;
+        // Then by total time descending (most played at top)
+        return b.totalMs - a.totalMs;
+      });
+  }, [players]);
+
+  // Toggle accordion expansion
+  const toggleExpanded = (id) => {
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
   // Chart data
   const chartData = players.map((p) => ({
     name: p.name,
@@ -409,6 +456,29 @@ export default function PlayingTimeApp() {
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-sky-50 via-white to-violet-50 text-gray-900 pb-40">
+      {/* Error Toast */}
+      <AnimatePresence>
+        {errorToast && (
+          <motion.div
+            initial={{ opacity: 0, y: -50, scale: 0.9 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -20, scale: 0.9 }}
+            className="fixed top-4 left-1/2 -translate-x-1/2 z-[100] px-4 py-3 rounded-2xl bg-rose-600 text-white shadow-lg flex items-center gap-3 max-w-[90vw]"
+          >
+            <div className="w-6 h-6 rounded-full bg-white/20 flex items-center justify-center shrink-0">
+              <span className="text-sm font-bold">!</span>
+            </div>
+            <span className="text-sm font-medium">{errorToast}</span>
+            <button
+              onClick={() => setErrorToast(null)}
+              className="ml-2 text-white/80 hover:text-white"
+            >
+              ✕
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Header */}
       <div className="sticky top-0 z-40 backdrop-blur supports-[backdrop-filter]:bg-white/70 bg-white/90 border-b">
         <div className="max-w-3xl mx-auto px-4 py-3 flex items-center justify-between gap-3">
@@ -480,60 +550,6 @@ export default function PlayingTimeApp() {
           />
         </div>
 
-        {/* Roster manager */}
-        <section className="bg-white/90 rounded-2xl shadow-sm p-4 space-y-3">
-          <h2 className="font-semibold">Roster</h2>
-          <div className="flex flex-wrap items-center gap-2">
-            <input
-              className="rounded-xl border px-3 py-3 w-56"
-              value={rosterName}
-              onChange={(e) => setRosterName(e.target.value)}
-              placeholder="Roster name"
-            />
-            <button
-              className="px-4 py-3 rounded-xl bg-emerald-600 text-white hover:bg-emerald-700 active:scale-[.99]"
-              onClick={saveCurrentRoster}
-            >
-              Save
-            </button>
-            <select
-              className="rounded-xl border px-3 py-3"
-              onChange={(e) =>
-                e.target.value && loadRosterByName(e.target.value)
-              }
-              defaultValue=""
-            >
-              <option value="" disabled>
-                Load…
-              </option>
-              {simpleRosterOptions.map((name) => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
-              ))}
-            </select>
-            <select
-              className="rounded-xl border px-3 py-3"
-              onChange={(e) => {
-                const v = e.target.value;
-                if (!v) return;
-                deleteRosterByName(v);
-                e.target.value = "";
-              }}
-              defaultValue=""
-            >
-              <option value="" disabled>
-                Delete…
-              </option>
-              {simpleRosterOptions.map((name) => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
-              ))}
-            </select>
-          </div>
-        </section>
-
         {/* Period tabs */}
         <section className="bg-white/90 rounded-2xl shadow-sm p-3">
           <div className="flex flex-wrap items-center gap-2 justify-between">
@@ -570,108 +586,27 @@ export default function PlayingTimeApp() {
           </p>
         </section>
 
-        {/* Players list (mobile cards) */}
-        <section className="space-y-2">
-          <div className="flex items-center justify-end">
-            <Segmented
-              value={layout}
-              onChange={setLayout}
-              options={[
-                { value: "columns", label: "Columns" },
-                { value: "cards", label: "Cards" },
-              ]}
-            />
+        {/* Players list - Accordion cards */}
+        <section className="space-y-1">
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-xs text-gray-500">
+              <span className="inline-flex items-center gap-1">
+                <span className="w-2 h-2 rounded-full bg-emerald-500" /> On court
+              </span>
+              <span className="mx-2">•</span>
+              <span>Sorted by play time</span>
+            </div>
+            <button
+              onClick={() => setExpandedIds(new Set())}
+              className="text-xs text-indigo-600 hover:text-indigo-800"
+            >
+              Collapse all
+            </button>
           </div>
 
-          {layout === "columns" ? (
-            <div className="overflow-x-auto">
-              <div
-                className="grid gap-2"
-                style={{
-                  gridAutoFlow: "column",
-                  gridAutoColumns: "minmax(140px,1fr)",
-                }}
-              >
-                {players.map((p, idx) => {
-                  const base = baselineMs || 1;
-                  const prog = Math.max(0, Math.min(1, p.totalMs / base));
-                  const delta =
-                    p.totalMs -
-                    (baseline === "goal"
-                      ? goalPerPlayerFullGameMs
-                      : idealMsSoFar);
-                  return (
-                    <motion.div
-                      key={p.id}
-                      className="bg-white rounded-2xl shadow-sm p-3 min-w-[140px]"
-                    >
-                      <div className="flex items-center gap-2 mb-2">
-                        <input
-                          type="checkbox"
-                          checked={p.active}
-                          onChange={() => toggleActive(idx)}
-                          className="h-5 w-5"
-                        />
-                        <input
-                          className="w-full rounded-xl border px-2 py-1 font-medium"
-                          value={p.name}
-                          onChange={(e) => updateName(idx, e.target.value)}
-                        />
-                      </div>
-                      <Progress value={prog * 100} />
-                      <div className="mt-1 text-[11px] text-gray-600 space-y-1">
-                        <div>
-                          Total:{" "}
-                          <b className="tabular-nums">{msToClock(p.totalMs)}</b>
-                        </div>
-                        <div>
-                          Δ {baseline === "goal" ? "vs Goal" : "vs Ideal"}:{" "}
-                          <b
-                            className={`tabular-nums ${
-                              delta < 0
-                                ? "text-blue-700"
-                                : delta > 0
-                                ? "text-rose-700"
-                                : ""
-                            }`}
-                          >
-                            {delta === 0
-                              ? "±00:00"
-                              : `${delta > 0 ? "+" : "-"}${msToClock(
-                                  Math.abs(delta)
-                                )}`}
-                          </b>
-                        </div>
-                      </div>
-                      <div
-                        className="mt-2 grid gap-2 text-[11px]"
-                        style={{
-                          gridTemplateColumns: `repeat(${Math.max(
-                            1,
-                            displayedPeriods.length
-                          )}, minmax(0,1fr))`,
-                        }}
-                      >
-                        {displayedPeriods.map((i) => (
-                          <div
-                            key={i}
-                            className="rounded-lg bg-gray-100 px-2 py-1 text-center tabular-nums"
-                          >
-                            <div className="text-[10px] text-gray-500">
-                              {periodLabels[i]}
-                            </div>
-                            {msToClock(p.periodMs[i] || 0)}
-                          </div>
-                        ))}
-                      </div>
-                    </motion.div>
-                  );
-                })}
-              </div>
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {players.map((p, idx) => {
+          <LayoutGroup>
+            <div className="flex flex-col gap-1">
+              {sortedPlayers.map((p) => {
                 const base = baselineMs || 1;
                 const prog = Math.max(0, Math.min(1, p.totalMs / base));
                 const delta =
@@ -679,78 +614,146 @@ export default function PlayingTimeApp() {
                   (baseline === "goal"
                     ? goalPerPlayerFullGameMs
                     : idealMsSoFar);
+                const isExpanded = expandedIds.has(p.id);
+
                 return (
                   <motion.div
                     key={p.id}
-                    whileTap={{ scale: 0.995 }}
-                    className="bg-white rounded-2xl shadow-sm p-3 flex items-center gap-3"
+                    layout
+                    transition={{
+                      layout: { type: "spring", stiffness: 500, damping: 35 },
+                    }}
+                    className={`rounded-2xl shadow-sm overflow-hidden ${
+                      p.active
+                        ? "bg-gradient-to-r from-emerald-50 to-white border-l-4 border-emerald-500"
+                        : "bg-white"
+                    }`}
                   >
-                    <input
-                      type="checkbox"
-                      checked={p.active}
-                      onChange={() => toggleActive(idx)}
-                      className="h-6 w-6"
-                    />
-                    <div className="flex-1 min-w-0">
+                    {/* Collapsed header - always visible */}
+                    <motion.div
+                      layout="position"
+                      className="flex items-center gap-3 p-3 cursor-pointer"
+                      onClick={() => toggleExpanded(p.id)}
+                    >
                       <input
-                        className="w-full rounded-xl border px-3 py-2 font-medium"
-                        value={p.name}
-                        onChange={(e) => updateName(idx, e.target.value)}
+                        type="checkbox"
+                        checked={p.active}
+                        onChange={(e) => {
+                          e.stopPropagation();
+                          toggleActive(p.originalIdx);
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                        className="h-6 w-6 shrink-0"
                       />
-                      <div className="mt-2">
+                      <div className="flex-1 min-w-0 flex items-center gap-3">
+                        <span className="font-medium truncate">{p.name}</span>
+                        <span className="text-xs tabular-nums text-gray-600">
+                          {msToClock(p.totalMs)}
+                        </span>
+                        <span
+                          className={`text-xs tabular-nums ${
+                            delta < 0
+                              ? "text-blue-600"
+                              : delta > 0
+                              ? "text-rose-600"
+                              : "text-gray-500"
+                          }`}
+                        >
+                          {delta === 0
+                            ? "±0"
+                            : `${delta > 0 ? "+" : ""}${Math.round(
+                                delta / 1000
+                              )}s`}
+                        </span>
+                      </div>
+                      <div className="w-16 shrink-0">
                         <Progress value={prog * 100} />
                       </div>
-                      <div className="mt-1 text-[11px] text-gray-600 flex flex-wrap gap-3">
-                        <span>
-                          Total:{" "}
-                          <b className="tabular-nums">{msToClock(p.totalMs)}</b>
-                        </span>
-                        <span>
-                          Δ {baseline === "goal" ? "vs Goal" : "vs Ideal"}:{" "}
-                          <b
-                            className={`tabular-nums ${
-                              delta < 0
-                                ? "text-blue-700"
-                                : delta > 0
-                                ? "text-rose-700"
-                                : ""
-                            }`}
-                          >
-                            {delta === 0
-                              ? "±00:00"
-                              : `${delta > 0 ? "+" : "-"}${msToClock(
-                                  Math.abs(delta)
-                                )}`}
-                          </b>
-                        </span>
-                      </div>
-                      <div
-                        className="mt-2 grid gap-2 text-[11px]"
-                        style={{
-                          gridTemplateColumns: `repeat(${Math.max(
-                            1,
-                            displayedPeriods.length
-                          )}, minmax(0,1fr))`,
-                        }}
+                      <motion.div
+                        animate={{ rotate: isExpanded ? 180 : 0 }}
+                        transition={{ duration: 0.2 }}
+                        className="shrink-0 text-gray-400"
                       >
-                        {displayedPeriods.map((i) => (
-                          <div
-                            key={i}
-                            className="rounded-lg bg-gray-100 px-2 py-1 text-center tabular-nums"
-                          >
-                            <div className="text-[10px] text-gray-500">
-                              {periodLabels[i]}
+                        <ChevronDown size={20} />
+                      </motion.div>
+                    </motion.div>
+
+                    {/* Expanded content */}
+                    <AnimatePresence initial={false}>
+                      {isExpanded && (
+                        <motion.div
+                          initial={{ height: 0, opacity: 0 }}
+                          animate={{ height: "auto", opacity: 1 }}
+                          exit={{ height: 0, opacity: 0 }}
+                          transition={{ duration: 0.2 }}
+                          className="overflow-hidden"
+                        >
+                          <div className="px-3 pb-3 pt-0 space-y-3">
+                            <input
+                              className="w-full rounded-xl border px-3 py-2 font-medium"
+                              value={p.name}
+                              onChange={(e) =>
+                                updateName(p.originalIdx, e.target.value)
+                              }
+                              onClick={(e) => e.stopPropagation()}
+                            />
+                            <div className="text-[11px] text-gray-600 flex flex-wrap gap-3">
+                              <span>
+                                Total:{" "}
+                                <b className="tabular-nums">
+                                  {msToClock(p.totalMs)}
+                                </b>
+                              </span>
+                              <span>
+                                Δ {baseline === "goal" ? "vs Goal" : "vs Ideal"}
+                                :{" "}
+                                <b
+                                  className={`tabular-nums ${
+                                    delta < 0
+                                      ? "text-blue-700"
+                                      : delta > 0
+                                      ? "text-rose-700"
+                                      : ""
+                                  }`}
+                                >
+                                  {delta === 0
+                                    ? "±00:00"
+                                    : `${delta > 0 ? "+" : "-"}${msToClock(
+                                        Math.abs(delta)
+                                      )}`}
+                                </b>
+                              </span>
                             </div>
-                            {msToClock(p.periodMs[i] || 0)}
+                            <div
+                              className="grid gap-2 text-[11px]"
+                              style={{
+                                gridTemplateColumns: `repeat(${Math.max(
+                                  1,
+                                  displayedPeriods.length
+                                )}, minmax(0,1fr))`,
+                              }}
+                            >
+                              {displayedPeriods.map((i) => (
+                                <div
+                                  key={i}
+                                  className="rounded-lg bg-gray-100 px-2 py-1 text-center tabular-nums"
+                                >
+                                  <div className="text-[10px] text-gray-500">
+                                    {periodLabels[i]}
+                                  </div>
+                                  {msToClock(p.periodMs[i] || 0)}
+                                </div>
+                              ))}
+                            </div>
                           </div>
-                        ))}
-                      </div>
-                    </div>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
                   </motion.div>
                 );
               })}
             </div>
-          )}
+          </LayoutGroup>
         </section>
 
         {/* Chart */}
@@ -925,6 +928,60 @@ export default function PlayingTimeApp() {
               ]}
             />
           </div>
+        </div>
+      </section>
+
+      {/* Roster manager */}
+      <section className="bg-white/90 rounded-2xl shadow-sm p-4 space-y-3">
+        <h2 className="font-semibold">Roster</h2>
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            className="rounded-xl border px-3 py-3 w-56"
+            value={rosterName}
+            onChange={(e) => setRosterName(e.target.value)}
+            placeholder="Roster name"
+          />
+          <button
+            className="px-4 py-3 rounded-xl bg-emerald-600 text-white hover:bg-emerald-700 active:scale-[.99]"
+            onClick={saveCurrentRoster}
+          >
+            Save
+          </button>
+          <select
+            className="rounded-xl border px-3 py-3"
+            onChange={(e) =>
+              e.target.value && loadRosterByName(e.target.value)
+            }
+            defaultValue=""
+          >
+            <option value="" disabled>
+              Load…
+            </option>
+            {simpleRosterOptions.map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+          <select
+            className="rounded-xl border px-3 py-3"
+            onChange={(e) => {
+              const v = e.target.value;
+              if (!v) return;
+              deleteRosterByName(v);
+              e.target.value = "";
+            }}
+            defaultValue=""
+          >
+            <option value="" disabled>
+              Delete…
+            </option>
+            {simpleRosterOptions.map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
         </div>
       </section>
 
